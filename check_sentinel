@@ -1,0 +1,237 @@
+#! /usr/bin/perl -w
+#
+# usage: 
+#    check_sentinel hostname
+#
+# Check Sentinel license managers.
+# Use lsmon to check the status of the license server
+# running on the indicated host
+#
+# Check and interpret the output of lsmon
+# and create returncodes and output.
+#
+#
+# Notes:
+# - you need the lsmon utility which comes with Sentinel.
+# - set the correct path in the variable $lmstat.
+#
+# License: GPL
+#
+# initial version: 9-10-99 Ernst-Dieter Martin edmt@infineon.com
+#   as check_flexlm
+# 
+# lmstat output patches from Steve Rigler/Cliff Rice 13-Apr-2002
+# srigler@marathonoil.com,cerice@marathonoil.com
+#
+# flexlm -> rlm   10-Jul-2012 Austin Murphy austin.murphy@gmail.com
+# rlm -> sentinel  01-Jul-2013 Austin Murphy austin.murphy@gmail.com
+
+
+
+use strict;
+use Getopt::Long;
+use Time::Local;
+use vars qw($opt_V $opt_h $opt_H $opt_t $verbose $PROGNAME);
+use lib "/usr/lib/nagios/plugins";
+use utils qw(%ERRORS &print_revision &support &usage);
+
+$PROGNAME="check_sentinel";
+
+#
+# helper util
+#
+my $lmstatpath = "/usr/local/bin" ;
+my $lmstatutil = "lsmon" ;
+
+#
+# option
+my $warndays = 30;
+my $critdays = 0;
+my $nextexp = 2500;
+
+
+sub print_help ();
+sub print_usage ();
+
+$ENV{'PATH'}='';
+$ENV{'BASH_ENV'}=''; 
+$ENV{'ENV'}='';
+
+Getopt::Long::Configure('bundling');
+GetOptions
+	("V"   => \$opt_V,   "version"    => \$opt_V,
+	 "h"   => \$opt_h,   "help"       => \$opt_h,
+	 "v"   => \$verbose, "verbose"    => \$verbose,
+         "H=s" => \$opt_H,   "hostname=s" => \$opt_H,
+	 "t=i" => \$opt_t, "timeout=i"  => \$opt_t);
+
+if ($opt_V) {
+	print_revision($PROGNAME,'1.4.15');
+	exit $ERRORS{'OK'};
+}
+
+unless (defined $opt_t) {
+	#$opt_t = $utils::TIMEOUT ;	# default timeout
+	$opt_t = 35 ;	# longer timeout than lsmon
+}
+
+
+if ($opt_h) {print_help(); exit $ERRORS{'OK'};}
+
+# Just in case of problems, let's not hang Nagios
+$SIG{'ALRM'} = sub {
+	print "Timeout: No Answer from Client\n";
+	exit $ERRORS{'UNKNOWN'};
+};
+alarm($opt_t);
+
+
+# defined at top
+my $lmstat = $lmstatpath."/".$lmstatutil ;
+
+unless (-x $lmstat ) {
+	print "Cannot find \"$lmstatutil\"\n";
+	exit $ERRORS{'UNKNOWN'};
+}
+
+($opt_H) || ($opt_H = shift) || usage("Hostname not specified\n");
+my $hostname = $1 if ($opt_H =~ /^(.*)$/);
+
+print "$hostname\n" if $verbose;
+
+if ( ! open(CMD,"$lmstat $hostname |") ) {
+	print "ERROR: Could not open \"$lmstat $hostname\" ($!)\n";
+	exit exit $ERRORS{'UNKNOWN'};
+}
+
+
+my %features;
+my $feat;
+
+while ( <CMD> ) {
+	print $_ if $verbose;
+
+        # Common lines
+	next if (/^  Sentinel/);
+	next if (/^  Copyright/);
+	next if (/^$/); 
+
+        # Good lines
+        if (/^ \|- Feature Information/)         { $feat = ""; };
+        if (/^   \|- Feature name\s+: "(.*)".*$/)    { $feat = $1; };
+        if (/^   \|- Feature version\s+: "(.*)".*$/) { $features{$feat}{'version'} = $1; };
+        if (/^   \|- Expiration date\s+: (.*)\S*$/) { $features{$feat}{'expdate'} = $1; };
+        # We could collect other info here, but it isn't necessary yet
+
+        # Bad line
+        if (/^Sentinel RMS Development Kit:(.*)$/) { 
+            print "SENTINEL CRITICAL - $1\n" ;
+            exit $ERRORS{'CRITICAL'}; 
+        }
+}
+
+
+close CMD;
+
+
+# check how far away the expiration date is
+
+my $now = time();
+
+my $comment; 
+for my $k (keys %features) {
+    my $date = $features{$k}{'expdate'};
+    $date =~ /^\S+ (\S\S\S) (\d\d) (\d\d):(\d\d):(\d\d) (\d\d\d\d)/;
+    my $later = timelocal($5, $4, $3, $2, month_num($1), $6 );
+    my $diff = $later - $now;
+    my $diffdays = int($diff / 86400);
+    if ($diffdays < $nextexp ) { $nextexp = $diffdays;}
+    
+    $date =~ s/ \d\d:\d\d:\d\d//;
+    $date =~ s/(Mon|Tue|Wed|Thu|Fri|Sat|Sun) //;
+    $comment .= "Feature $k.$features{$k}{'version'} expires in $diffdays days ($date), ";
+} 
+$comment =~ s/, $//;
+
+
+if ( $nextexp <= $critdays ) {
+
+    print "SENTINEL CRITICAL - $comment\n";
+    exit $ERRORS{'CRITICAL'};
+} elsif ( $nextexp <= $warndays ) {
+
+    print "SENTINEL WARNING - $comment\n";
+    exit $ERRORS{'WARNING'};
+} else {
+
+    print "SENTINEL OK - $comment\n";
+    exit $ERRORS{'OK'};
+}
+
+
+sub month_num {
+  $_ = shift(@_);
+  if (/Jan/) { 
+    return 0;
+  } elsif (/Feb/) {
+    return 1;
+  } elsif (/Mar/) {
+    return 2;
+  } elsif (/Apr/) {
+    return 3;
+  } elsif (/May/) {
+    return 4;
+  } elsif (/Jun/) {
+    return 5;
+  } elsif (/Jul/) {
+    return 6;
+  } elsif (/Aug/) {
+    return 7;
+  } elsif (/Sep/) {
+    return 8;
+  } elsif (/Oct/) {
+    return 9;
+  } elsif (/Nov/) {
+    return 10;
+  } elsif (/Dec/) {
+    return 11;
+  }
+}
+
+
+sub print_usage () {
+    print "Usage:
+    $PROGNAME -H <hostname> [-v] [-t] [-V] [-h]
+    $PROGNAME --help
+    $PROGNAME --version
+";
+}
+
+sub print_help () {
+	print_revision($PROGNAME,'1.4.16');
+	print "Copyright (c) 2000 Ernst-Dieter Martin/Karl DeBisschop
+
+Check available Sentinel license managers
+
+";
+	print_usage();
+	print "
+-H, --hostname=FILE
+   The server to check
+-v, --verbose
+   Print some extra debugging information (not advised for normal operation)
+-t, --timeout
+   Plugin time out in seconds (default = $utils::TIMEOUT )
+-V, --version
+   Show version and license information
+-h, --help
+   Show this help screen
+
+Sentinel license managers usually run as a single server
+  The plugin returns OK if the server responds and has non-expired features,
+WARNING if features are expired, and CRITICAL if there is no response. \n
+... at least that's the idea...
+";
+	support();
+}
+

@@ -1,0 +1,287 @@
+#! /usr/bin/perl -w
+#
+# usage: 
+#    check_flexlm -F license_file
+#
+# Check available flexlm license managers.
+# Use lmstat to check the status of the license server
+# described by the license file given as argument.
+# Check and interpret the output of lmstat
+# and create returncodes and output.
+#
+# Contrary to the nagios concept, this script takes
+# a file, not a hostname as an argument and returns
+# the status of hosts and services described in that
+# file. Use these hosts.cfg entries as an example
+#
+#
+# Notes:
+# - you need the lmutil utility which comes with flexlm.
+# - set the correct path in the variable $lmutil.
+#
+# License: GPL
+#
+# initial version: 9-10-99 Ernst-Dieter Martin edmt@infineon.com
+#
+# lmstat output patches from Steve Rigler/Cliff Rice 13-Apr-2002
+# srigler@marathonoil.com,cerice@marathonoil.com
+#
+# 2013-07-24 - Austin Murphy <austin.murphy@gmail.com> 
+#   - switch to use "lmutil lmstat" instead of "lmstat"
+#   - add daemons check
+#   - redo exit status and comments
+
+
+
+use strict;
+use Getopt::Long;
+use vars qw($opt_V $opt_h $opt_F $opt_t $verbose $PROGNAME);
+use lib "/usr/lib/nagios/plugins";
+use utils qw(%ERRORS &print_revision &support &usage);
+
+$PROGNAME="check_flexlm";
+
+sub print_help ();
+sub print_usage ();
+
+$ENV{'PATH'}='';
+$ENV{'BASH_ENV'}=''; 
+$ENV{'ENV'}='';
+
+Getopt::Long::Configure('bundling');
+GetOptions
+	("V"   => \$opt_V,   "version"    => \$opt_V,
+	 "h"   => \$opt_h,   "help"       => \$opt_h,
+	 "v"   => \$verbose, "verbose"    => \$verbose,
+	 "F=s" => \$opt_F,   "filename=s" => \$opt_F,
+	 "t=i" => \$opt_t, "timeout=i"  => \$opt_t);
+
+if ($opt_V) {
+	print_revision($PROGNAME,'1.4.17');
+	exit $ERRORS{'OK'};
+}
+
+unless (defined $opt_t) {
+	$opt_t = $utils::TIMEOUT ;	# default timeout
+}
+
+
+if ($opt_h) {print_help(); exit $ERRORS{'OK'};}
+
+unless (defined $opt_F) {
+	print "Missing license.dat file\n";
+	print_usage();
+	exit $ERRORS{'UNKNOWN'};
+}
+# Just in case of problems, let's not hang Nagios
+$SIG{'ALRM'} = sub {
+	print "Timeout: No Answer from Client\n";
+	exit $ERRORS{'UNKNOWN'};
+};
+alarm($opt_t);
+
+my $lmutil = "/usr/local/bin/lmutil";
+unless (-x $lmutil ) {
+	print "Cannot find \"lmutil\"\n";
+	exit $ERRORS{'UNKNOWN'};
+}
+
+($opt_F) || ($opt_F = shift) || usage("License file not specified\n");
+my $licfile = $1 if ($opt_F =~ /^(.*)$/);
+($licfile) || usage("Invalid filename: $opt_F\n");
+
+print "$licfile\n" if $verbose;
+
+if ( ! open(CMD,"$lmutil lmstat -c $licfile |") ) {
+	print "ERROR: Could not open \"$lmutil -c $licfile\" ($!)\n";
+	exit exit $ERRORS{'UNKNOWN'};
+}
+
+my $serverup = 0;
+my @upsrv; 
+my @downsrv;  # list of servers up and down
+
+my $daemonup = 0;
+my @updmn; 
+my @downdmn;  # list of daemons up and down
+
+ 
+# key off of the term "license server" and 
+# grab the status.  Keep going until "Vendor" is found
+#
+
+#
+# Collect list of license servers by their status
+
+while ( <CMD> ) {
+    next if (/^lmstat/);   # ignore 1st line - copyright
+    next if (/^Flexible/); # ignore 2nd line - timestamp
+    #print $_ if $verbose;
+    (/^Vendor/) && last;   # stop collecting server status at Vendor daemon status
+    
+    if ($_ =~ /license server /) {	# matched 1 (of possibly 3) license server
+        s/^\s*//;             # some servers start at col 1, other have whitespace
+                              # strip starting whitespace if any
+        if ( $_ =~ /UP/) {
+            $_ =~ /^(.*):/ ;
+            push(@upsrv, $1);
+            print "up:$1:\n" if $verbose;
+        } else {
+            $_ =~ /^(.*):/; 
+            push(@downsrv, $1);
+            print "down:$1:\n" if $verbose;
+        }
+		
+    }
+}
+
+#
+# Collect the list of vendor deamons by their status
+
+while ( <CMD> ) {
+    #print $_ if $verbose;
+    if ($_ =~ /:/) {	      
+        s/^\s*//;            
+                            
+        if ( $_ =~ /UP/) {
+            $_ =~ /^(.*):/ ;
+            push(@updmn, $1);
+            print "up:$1:\n" if $verbose;
+        } else {
+            $_ =~ /^(.*):/; 
+            push(@downdmn, $1);
+            print "down:$1:\n" if $verbose;
+        }
+
+    }
+    
+}
+
+close CMD;
+
+if ($verbose) {
+    print "License Servers running: ".scalar(@upsrv) ."\n";
+    foreach my $upserver (@upsrv) {
+        print "  $upserver\n";
+    }
+    print "License servers not running: ".scalar(@downsrv)."\n";
+    foreach my $downserver (@downsrv) {
+        print "  $downserver\n";
+    }
+}
+if ($verbose) {
+    print "Vendor Daemons running: ".scalar(@updmn) ."\n";
+    foreach my $updaemon (@updmn) {
+        print "  $updaemon\n";
+    }
+    print "Vendor Daemons not running: ".scalar(@downdmn)."\n";
+    foreach my $downdaemon (@downdmn) {
+        print "  $downdaemon\n";
+    }
+}
+
+my $comment;
+
+#
+# print list of servers which are up. 
+#
+if (scalar(@upsrv) > 0) {
+   #$comment .= "License Servers running:";
+   $comment .= " Server(s):";
+   foreach my $upserver (@upsrv) {
+      $comment .= " $upserver,";
+   }
+}
+#
+# Ditto for those which are down.
+#
+if (scalar(@downsrv) > 0) {
+   #$comment .= "License servers NOT running:";
+   $comment .= " Server(s) DOWN:";
+   foreach my $downserver (@downsrv) {
+      $comment .= " $downserver,";
+   }
+}
+
+
+#
+# print list of Vendor daemons which are up. 
+#
+if (scalar(@updmn) > 0) {
+   #$comment .= "Vendor daemons running:";
+   $comment .= " Daemon(s):";
+   foreach my $updaemon (@updmn) {
+      $comment .= " $updaemon,";
+   }
+}
+#
+# Ditto for those which are down.
+#
+if (scalar(@downdmn) > 0) {
+   #$comment .= "Vendor daemons NOT running:";
+   $comment .= " Daemon(s) DOWN:";
+   foreach my $downdaemon (@downdmn) {
+      $comment .= " $downdaemon,";
+   }
+}
+
+
+
+# perfdata
+my $perfdata;
+$perfdata .= "\n|flexlm::up:".scalar(@upsrv).";down:".scalar(@downsrv)."\n";
+
+
+$comment =~ s/,\s*$//;
+
+if ( ( scalar(@downsrv) == 0 ) && (scalar(@downdmn) == 0) )  {
+    print "FLEXLM OK -$comment \n";
+    # maybe print perfdata ?
+    exit $ERRORS{'OK'} ;
+} elsif ( (scalar(@upsrv) > 0) && (scalar(@downsrv) > 0) && (scalar(@downdmn) == 0) ) {
+    print "FLEXLM WARNING -$comment \n";
+    exit $ERRORS{'WARNING'} ;
+} else {
+    print "FLEXLM CRITICAL -$comment \n";
+    exit $ERRORS{'CRITICAL'} ;
+}
+
+
+
+
+sub print_usage () {
+	print "Usage:
+   $PROGNAME -F <filename> [-v] [-t] [-V] [-h]
+   $PROGNAME --help
+   $PROGNAME --version
+";
+}
+
+sub print_help () {
+	print_revision($PROGNAME,'1.4.16');
+	print "Copyright (c) 2000 Ernst-Dieter Martin/Karl DeBisschop
+
+Check available flexlm license managers
+
+";
+	print_usage();
+	print "
+-F, --filename=FILE
+   Name of license file (usually \"license.dat\")
+-v, --verbose
+   Print some extra debugging information (not advised for normal operation)
+-t, --timeout
+   Plugin time out in seconds (default = $utils::TIMEOUT )
+-V, --version
+   Show version and license information
+-h, --help
+   Show this help screen
+
+Flexlm license managers usually run as a single server or three servers and a
+quorum is needed.  The plugin return OK if 1 (single) or 3 (triple) servers
+are running, CRITICAL if 1(single) or 3 (triple) servers are down, and WARNING
+if 1 or 2 of 3 servers are running\n
+";
+	support();
+}
+

@@ -1,0 +1,87 @@
+#!/bin/bash
+#
+#  check_lsfhost <hostname>
+#
+#  Checks whether host is "ok", ie. if it has capacity will it accept jobs?
+#
+#  Written by  Austin Murphy 2013-07-02 austin.murphy@gmail.com
+#
+#  Released to the Public Domain
+#
+
+# get the status defs
+PLUGINDIR=/usr/lib64/nagios/plugins
+. $PLUGINDIR/utils.sh
+
+CHECKBIN="/opt/openlava-2.0/bin/bhosts"
+
+
+SERVER=$1
+if [ "$SERVER" == "" ]
+then
+  echo "No Server specified"
+  exit $STATE_UNKNOWN
+fi
+
+
+OUTPUT=$($CHECKBIN -w $SERVER 2>&1 )
+RETCODE=$?
+
+STATUS=$(echo "$OUTPUT" | grep $SERVER | awk '{print $2}')
+MAX=$(echo "$OUTPUT" | grep $SERVER | awk '{print $4}')
+USED=$(echo "$OUTPUT" | grep $SERVER | awk '{print $5}')
+
+
+# 
+# status can be:
+#
+#  OK: 
+#      ok
+#      closed_Adm
+#      closed_Lock
+#      closed_Wind
+#      closed_Full
+#      closed_Excl
+#
+#  WARNING:
+#
+#      closed_Busy
+#      closed_LIM
+#
+#  CRITICAL:
+#
+#      unavail
+#      unreach
+#
+
+
+if [ $RETCODE -eq 0 ]
+then
+  if ( echo $STATUS | grep -qE "ok|closed_Adm|closed_Lock|closed_Wind|closed_Full|closed_Excl" )
+  then
+    echo "LSF OK - Slots: $MAX, Used: $USED"
+    exit $STATE_OK
+  fi
+  
+  if ( echo $STATUS | grep -qE "closed_Busy|closed_LIM" )
+  then
+    echo "LSF WARNING - Status: $STATUS "
+    exit $STATE_WARNING
+  fi
+  
+  if ( echo $STATUS | grep -qE "unavail|unreach" )
+  then
+    echo "LSF CRITICAL - Status: $STATUS "
+    exit $STATE_CRITICAL
+  fi
+fi
+
+
+#
+# Not sure what non-0 return code means. 
+#
+  
+echo "UNKNOWN - Not sure what happened! - $OUTPUT "
+exit $STATE_UNKNOWN
+
+

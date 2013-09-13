@@ -1,0 +1,180 @@
+#!/bin/bash
+
+# ========================================================================================
+# NFS health monitor plugin for Nagios
+# 
+# Written by         	: Steve Bosek (steve.bosek@gmail.com)
+# Release               : 1.0rc4
+# Creation date		: 8 May 2009
+# Revision date         : 7 Oct 2012
+# Package               : BU Plugins
+# Description           : Nagios plugin (script) to NFS health monitor (NFS server and/or client side).
+#			  With this plugin you can define client or server NFS side, RPC services which must be checked,
+#			  add or exclude NFS mountpoints and add or ignore file which contain the information on filesystems
+#			  on Linux and AIX plateforms
+#			 
+#			  
+#			  This script has been designed and written on Linux plateform. 
+#						
+# Usage                 : ./check_nfs_health.sh -i <server|client> -s <list rpc services> -a <add nfs mountpoint> -x <exclude nfs mountpoints> -f <add|ignore>
+#		
+#			Check NFS client-side :
+#			check_nfs_health.sh -i client -s default -a none -x none -f add 
+#			check_nfs_health.sh -i client -s portmapper,nlockmgr -a /backup,/nfs_share -x /mouth_share -f add
+#
+#			Check NFS basic client-side :
+#			check_nfs_health.sh -i client -s default -a /backup,/nfs_share -x none -f ignore
+#
+# -----------------------------------------------------------------------------------------
+#
+# TODO :  		- Performance Data (client-side and server-side) : nfsd_cpu, nfsd_used_threads, io_read, io_write, ...
+#			- Solaris, HP-UX, MAC OSX support
+#			- My atrocious English. Help Me ! ;-D  		
+#		 
+#
+# =========================================================================================
+#
+# HISTORY :
+#     Release	|     Date	|    Authors		| 	Description
+# --------------+---------------+-----------------------+----------------------------------
+# 1.0rc1	| 12.05.2009	| Steve Bosek		| Previous version  
+# 1.0rc2	| 15.05.2009	| Steve Bosek		| Add AIX Support (bash shell)
+#							  Add parameter [-f <add|ignore>] to ignore the file which 
+#							  contains the information on filesystems: /etc/fstab,..	 
+# 1.0rc3        | 19.05.2009    | Steve Bosek		| Add Solaris support (bash shell)
+#
+# 1.0rc4        | 10.07.2012    | Austin Murphy         | Strip client checks
+#                                                       | Strip performance checks
+#                                                       | Strip mountpoint checks
+#                                                       | Move reporting to end
+#                                                       | Use nagios codes from utils.sh
+#                                                       | added rquotad to services
+#                                                       | fixed FAULT_SERVICES_STATUS 
+# =========================================================================================
+
+# Paths to commands used in this script
+PATH=$PATH:/usr/sbin:/usr/bin
+
+# Plugin variable description
+PROGNAME=$(basename $0)
+PROGPATH=$(echo $0 | sed -e 's,[\\/][^\\/][^\\/]*$,,')
+REVISION="Revision 1.0rc3"
+AUTHOR="(c) 2009 Steve Bosek (steve.bosek@gmail.com)"
+
+. $PROGPATH/../utils.sh
+
+# Functions plugin usage
+print_revision() {
+    echo "$PROGNAME $REVISION $AUTHOR"
+}
+
+print_usage() {
+	echo "Usage: $PROGNAME -s <default|list NFS services> -i <client|server> -a <add nfs mountpoints> -x <exclude nfs mountpoints> -f <add|ignore>"
+	echo ""
+	echo "-h Show this page"
+	echo "-v Script version"
+	echo "-s List separate with comma of NFS dependent services. Look rpcinfo -p"
+	echo "		Default NFS server-side : nfs,mountd,portmapper,nlockmgr"
+}
+
+print_help() {
+	print_revision
+	echo ""
+	print_usage
+        echo ""
+	exit 0
+}
+
+# -----------------------------------------------------------------------------------------
+# Default variable if not define in script command parameter
+# -----------------------------------------------------------------------------------------
+NFS_SERVER_SERVICES=${NFS_SERVER_SERVICES:="nfs mountd portmapper nlockmgr rquotad"}
+NFS_SERVICES="default"
+NFS_SIDE="server"
+
+# -------------------------------------------------------------------------------------
+# Grab the command line arguments
+# --------------------------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-h | --help)
+            	print_help
+            	exit $STATE_OK
+            	;;
+        	-v | --version)
+                print_revision
+                exit $STATE_OK
+                ;;
+        	-s | --services)
+                shift
+                NFS_SERVICES=$1
+                ;;
+		*)  echo "Unknown argument: $1"
+            	print_usage
+            	exit $STATE_UNKNOWN
+            	;;
+		esac
+	shift
+done
+
+
+# -----------------------------------------------------------------------------------------
+# Check if NFS services are running
+# -----------------------------------------------------------------------------------------
+
+if [ "$NFS_SERVICES" = "default" ]; then
+    NFS_SERVICES=$NFS_SERVER_SERVICES
+else
+    NFS_SERVICES=$(echo $NFS_SERVICES | sed 's/,/ /g')
+fi
+
+
+for i in ${NFS_SERVICES}; do
+	NFS_SERVICES_STATUS=$(rpcinfo -p | grep -w ${i} | wc -l)
+	if [ $NFS_SERVICES_STATUS -eq 0 ]; then
+		FAULT_SERVICES_STATUS=$(echo "$FAULT_SERVICES_STATUS $i")  
+	fi 
+done
+
+
+# -----------------------------------------------------------------------------------------
+# Check if exported directories exist
+# -----------------------------------------------------------------------------------------
+
+NFS_EXPORTS=`showmount -e 2>/dev/null | awk '{ print $1 }' | sed "1,1d" | tr -s "\n" " "` 
+
+# Check exportfs
+for i in ${NFS_EXPORTS[@]}; do
+    if [ ! -d $i ]; then 
+        FAULT_ARRAY=( ${FAULT_ARRAY[@]} $i )
+    fi
+done
+
+
+# -----------------------------------------------------------------------------------------
+# Report status 
+# -----------------------------------------------------------------------------------------
+
+# NFS services are NOT running
+if [ ${#FAULT_SERVICES_STATUS[@]} != 0 ]; then
+	echo  "NFS CRITICAL : NFS services not running: ${FAULT_SERVICES_STATUS[@]} "
+ 	exit $STATE_CRITICAL
+
+# No directories exported
+elif [ -z "$NFS_EXPORTS" ]; then
+    echo "NFS UNKNOWN : NFS no export(s) "
+    exit $STATE_UNKNOWN
+
+# Exported directory does not exist
+elif [ ${#FAULT_ARRAY[@]} != 0 ]; then
+    echo "NFS CRITICAL : NFS export(s) missing: ${FAULT_ARRAY[@]}"
+    exit $STATE_CRITICAL
+
+# all OK
+else
+    echo "NFS OK : NFS services: ${NFS_SERVICES[@]}, export(s): ${NFS_EXPORTS[@]}"
+    exit $STATE_OK
+fi
+
+
+
